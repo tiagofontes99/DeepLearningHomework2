@@ -3,19 +3,21 @@ from torch.utils.data import DataLoader
 import torch.nn as nn
 from torch import optim
 
-from utils import load_rnacompete_data
-import utils
+from utils_w_masking import load_rnacompete_data
+import utils_w_masking
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # Set seed for reproducibility
-utils.configure_seed(42)
+utils_w_masking.configure_seed(42)
 
 # GPU
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
 """### LSTM (Long Short-Term Memory) model - Bidiretional"""
+
+from torch.nn.utils.rnn import pack_padded_sequence
 
 class LSTM(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, n_layers, bidirectional, dropout):
@@ -34,17 +36,25 @@ class LSTM(nn.Module):
         self.fc = nn.Linear(hidden_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, seq_mask=None):
         # x shape: (Batch, Length, Channels)
+
+        if seq_mask is not None:
+            # Compute the real length from the sequence (sum of 1s in the mask)
+            lengths = seq_mask.sum(dim=1).cpu().int()
+
+            # Pack the padded sequence (creates a sequence object that ignores the padded elements)
+            x = pack_padded_sequence(x, lengths, batch_first=True, enforce_sorted=False)
+
         output, (hidden, cell) = self.lstm(x)
 
         if self.bidirectional:
             # concat the final forward (hidden[-2,:,:]) and backward (hidden[-1,:,:]) hidden layers
             hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1)
         else:
-            hidden = hidden[-1,:,:]   # take the last hidden layer
+            hidden = hidden[-1,:,:]     # take the last hidden layer
 
-        hidden = self.dropout(hidden) # aplica dropout
+        hidden = self.dropout(hidden)   # aplica dropout
 
         return self.fc(hidden)
 
@@ -73,7 +83,7 @@ class CNN(nn.Module):
 
         self.fc1 = nn.Linear(conv_out_dim, output_dim)
 
-    def forward(self, x):
+    def forward(self, x, seq_mask=None):
         # Input: [Batch, Length, Channels] -> Permute para [Batch, Channels, Length]
         x = x.permute(0, 2, 1)
 
@@ -85,9 +95,9 @@ class CNN(nn.Module):
             x = self.dropout(x)
 
         # Output: [Batch, Channels, Length] -> Global Pool -> [Batch, Channels, 1]
+        # o global maxplooling ignora os elementos padding logo não é necessário usar a seq mask
         x = self.global_pool(x).squeeze(-1)  # obter o output por sequência, não por nucleótido
         x = self.dropout(x)
-
         x = self.fc1(x)
 
         return x
@@ -101,17 +111,24 @@ def train(model, train_dataloader, optimizer, criterion):
     model.train()
 
     for batch in tqdm(train_dataloader):
-        # Unpack the batch: (Sequences, Intensities, ValidityMasks)
-        x, y, mask = batch
+        # Unpack the batch: (sequences, sequence masks, untensities, ValidityMasks)
+        x, seqmask, y, mask = batch
 
-        # x shape:    (Batch, 41, 4)  <- One-Hot Encoded Sequence
-        # y shape:    (Batch, 1)      <- Normalized Binding Intensity
-        # mask shape: (Batch, 1)      <- 1.0 if valid, 0.0 if NaN
+        # x shape:          (Batch, 41, 4) - One-Hot Encoded Sequence
+        # seq_mask shape:   (Batch, 41)    - 1.0 if valid, 0.0 if NaN
+        # y shape:          (Batch, 1)     - Normalized Binding Intensity
+        # mask shape:       (Batch, 1)     - 1.0 if valid, 0.0 if NaN
+
+        # Move tensors to gpu
+        x = x.to(device)
+        seqmask = seqmask.to(device)
+        y = y.to(device)
+        mask = mask.to(device)
 
         optimizer.zero_grad()
 
         # forward pass
-        predictions = model(x)
+        predictions = model(x, seqmask)
 
         # Calculate Loss - use the mask to zero out invalid data points
         loss = criterion(predictions, y, mask)
@@ -136,31 +153,33 @@ def evaluate(model, eval_dataloader, criterion):
 
         for batch in tqdm(eval_dataloader):
             # Unpack the batch: (Sequences, Intensities, ValidityMasks)
-            x, y, mask = batch
+            x, seq_mask, y, mask = batch
 
-            # x shape:    (Batch, 41, 4)  <- One-Hot Encoded Sequence
-            # y shape:    (Batch, 1)      <- Normalized Binding Intensity
-            # mask shape: (Batch, 1)      <- 1.0 if valid, 0.0 if NaN
+            # mover tensores para a gpu
+            x = x.to(device)
+            seq_mask = seq_mask.to(device)
+            y = y.to(device)
+            mask = mask.to(device)
 
             # forward pass
-            predictions = model(x)
+            predictions = model(x, seq_mask)
 
             # Calculate Loss - use the mask to zero out invalid data points
             loss = criterion(predictions, y, mask)
             epoch_loss += loss.item()
 
-            # Guardar tensores
+            # guardar tensores na RAM porque a gpu tem memoria limitada (VRAM)
             all_preds.append(predictions.cpu())
             all_targets.append(y.cpu())
             all_masks.append(mask.cpu())
 
-    # Concatenar tudo num único tensor grande
+    # concatenar todos os batches num unico tensor grande para usar no spearman
     full_preds = torch.cat(all_preds)
     full_targets = torch.cat(all_targets)
     full_masks = torch.cat(all_masks)
 
-    # Calcular Spearman Correlation
-    spearman_corr = utils.masked_spearman_correlation(full_preds, full_targets, full_masks)
+    # calculate the Spearman Correlation
+    spearman_corr = utils_w_masking.masked_spearman_correlation(full_preds, full_targets, full_masks)
 
     return epoch_loss / len(eval_dataloader), spearman_corr
 
@@ -200,17 +219,21 @@ best_valid_losses_LSTM = []
 for config in combinations:
     print(f"\n Testing config: {config}")
 
-    model_LSTM = LSTM(input_dim=4,
+    model_LSTM = LSTM(
+                    input_dim=4,
                     hidden_dim=config['width'],
                     output_dim=1,
                     n_layers=config['num_layers'],
                     bidirectional=True,
                     dropout=config['dropout'],
-                    )
+                )
+
+    # move model to gpu
+    model_LSTM = model_LSTM.to(device)
 
     optimizer = optim.Adam(model_LSTM.parameters(), lr=config['lr_rate'], weight_decay=1e-4)
 
-    criterion = utils.masked_mse_loss
+    criterion = utils_w_masking.masked_mse_loss
 
     # listas para guardar os resultados para os plots
     train_loss_LSTM = []
@@ -237,9 +260,8 @@ for config in combinations:
         best_config_LSTM = config
         best_train_losses_LSTM = train_loss_LSTM[:] # cópia da lista
         best_valid_losses_LSTM = valid_loss_LSTM[:]
-        # torch.save(model.state_dict(), 'best_lstm.pth')
 
-print(f"Melhor Configuração: {best_config_LSTM} com Spearman: {best_val_corr_LSTM}")
+print(f"Melhor configuração: {best_config_LSTM} com Spearman: {best_val_corr_LSTM}")
 
 hyper_params_CNN = {
     'num_layers': [1, 2],
@@ -257,12 +279,21 @@ best_config_CNN = None
 best_train_losses_CNN = []
 best_valid_losses_CNN = []
 
-criterion = utils.masked_mse_loss
+criterion = utils_w_masking.masked_mse_loss
 
 for config in combinations:
     print(f"\n Testing config: {config}")
 
-    model_CNN = CNN(input_dim=4, hidden_dim=config['width'], output_dim=1, num_layers=config['num_layers'], dropout=config['dropout'])
+    model_CNN = CNN(
+                    input_dim=4,
+                    hidden_dim=config['width'],
+                    output_dim=1,
+                    num_layers=config['num_layers'],
+                    dropout=config['dropout']
+                )
+
+    # move model to gpu
+    model_CNN = model_CNN.to(device)
 
     optimizer = optim.Adam(model_CNN.parameters(), lr=config['lr_rate'], weight_decay=1e-4)
 
@@ -291,12 +322,12 @@ for config in combinations:
         best_config_CNN = config
         best_train_losses_CNN = train_loss_CNN[:] # cópia da lista
         best_valid_losses_CNN = valid_loss_CNN[:]
-        # torch.save(model.state_dict(), 'best_CNN.pth')
 
-print(f"Melhor Configuração: {best_config_CNN} com Spearman: {best_val_corr_CNN}")
+print(f"Melhor configuração: {best_config_CNN} com Spearman: {best_val_corr_CNN}")
 
 """#### Plots for loss on train and validation sets"""
 
+# Plot training and validation losses for the best models
 plot_losses_LSTM = {
     'train Loss': best_train_losses_LSTM,
     'val Loss': best_valid_losses_LSTM
@@ -307,8 +338,7 @@ plot_losses_CNN = {
     'val Loss': best_valid_losses_CNN
 }
 
-epochs_range = range(1, num_epochs + 1)
-
+# Config string for filenames
 config_best_model_LSTM = (
         f"width-{best_config_LSTM['width']}-lr-{best_config_LSTM['lr_rate']}"
         f"-dropout-{best_config_LSTM['dropout']}-layers-{best_config_LSTM['num_layers']}"
@@ -319,5 +349,14 @@ config_best_model_CNN = (
         f"-dropout-{best_config_CNN['dropout']}-layers-{best_config_CNN['num_layers']}"
     )
 
-utils.plot(epochs_range, plot_losses_LSTM, filename=f'loss_LSTM-{config_best_model_LSTM}.pdf', ylim=None)
-utils.plot(epochs_range, plot_losses_CNN, filename=f'loss_CNN-{config_best_model_CNN}.pdf', ylim=None)
+# take the range of epochs for x-axis
+epochs_range = range(1, num_epochs + 1)
+
+# Plot and save figures as PDF
+utils_w_masking.plot(epochs_range, plot_losses_LSTM, filename=f'loss_LSTM-{config_best_model_LSTM}.pdf', ylim=None)
+utils_w_masking.plot(epochs_range, plot_losses_CNN, filename=f'loss_CNN-{config_best_model_CNN}.pdf', ylim=None)
+
+print(best_config_LSTM)
+print(best_val_corr_LSTM)
+print(best_config_CNN)
+print(best_val_corr_CNN)
