@@ -50,10 +50,11 @@ train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
 # 3. Training Loop Example
 for batch in train_loader:
-    # Unpack the batch: (Sequences, Intensities, ValidityMasks)
-    x, y, mask = batch
+    # Unpack the batch: (Sequences, SequenceMasks, Intensities, ValidityMasks)
+    x, x_mask, y, mask = batch
     
     # x shape:    (Batch, 41, 4)  <- One-Hot Encoded Sequence
+    # x mask:     (Batch, 41)    <- Mask for each sequence
     # y shape:    (Batch, 1)      <- Normalized Binding Intensity
     # mask shape: (Batch, 1)      <- 1.0 if valid, 0.0 if NaN
     
