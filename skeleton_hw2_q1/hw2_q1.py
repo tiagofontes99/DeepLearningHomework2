@@ -273,6 +273,7 @@ def main():
         filename=f"COMPARE_val_acc_4models_lr{lr}"
     )
 
+
     global_time = time.time() - global_start
     print("\n" + "=" * 70)
     print("DONE")
