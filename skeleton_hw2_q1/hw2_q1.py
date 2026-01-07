@@ -20,7 +20,7 @@ info = INFO[data_flag]
 n_classes = len(info["label"])
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize(mean=[.5], std=[.5])
+    transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
 ])
 
 def plot(x, y, ylabel="", name=""):
@@ -127,7 +127,7 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=256,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=4,
         pin_memory=True,
@@ -136,7 +136,7 @@ def main():
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=256,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=4,
         pin_memory=True,
@@ -176,7 +176,7 @@ def main():
             print("EXPERIMENT:", tag)
             print("=" * 70)
 
-            # cria modelo com as 2 flags
+
             model = CNN(num_classes=n_classes, use_maxpool=pool_flag, output_softmax=soft_flag).to(device)
 
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -191,6 +191,9 @@ def main():
             val_acc_list = []
 
             exp_start = time.time()
+
+
+            best_path = f"bloodmnist_cnn_{tag}.pth"
 
             for epoch in range(epochs):
                 t0 = time.time()
@@ -213,15 +216,17 @@ def main():
                 if val_acc > results["best_val"][tag]:
                     results["best_val"][tag] = val_acc
                     results["best_epoch"][tag] = epoch + 1
-                    torch.save(model.state_dict(), f"bloodmnist_cnn_{tag}.pth")
-                    print(f"Best model saved: bloodmnist_cnn_{tag}.pth | Val: {results['best_val'][tag]:.4f}")
+                    torch.save(model.state_dict(), best_path)
+                    print(f"Best model saved: {best_path} | Val: {results['best_val'][tag]:.4f}")
 
+
+            model.load_state_dict(torch.load(best_path, map_location=device))
             test_acc = evaluate_acc(test_loader, model)
 
             exp_time = time.time() - exp_start
             results["total_time"][tag] = exp_time
 
-            print(f"TestAcc: {test_acc:.4f}")
+            print(f"TestAcc (best-val checkpoint): {test_acc:.4f}")
             print(f"Total time ({tag}): {exp_time / 60:.2f} min ({exp_time:.2f} s)")
 
             # Store results
@@ -239,7 +244,6 @@ def main():
 
             plot(ep, val_acc_list, ylabel="Accuracy",
                  name=f"CNN-validation-accuracy_{tag}_lr{lr}")
-
 
             with open("results_plots/results_all_4models.json", "w") as f:
                 json.dump(results, f, indent=4)
