@@ -138,7 +138,7 @@ class LSTMWithAttention(nn.Module):
 
 
 
-"""### CNN 1D model - o filtro move-se numa única direção (sequência)"""
+"""### CNN 1D model - o filtro move-se numa única direção"""
 
 class CNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, dropout):
@@ -265,8 +265,7 @@ def evaluate(model, eval_dataloader, criterion):
 
 """#### Load the data"""
 
-# Load Data for a specific protein (e.g., 'RBFOX1', 'PTB', 'A1CF') -> Neste projeto usamos RBFOX1
-# This returns a PyTorch TensorDataset ready for training
+# Load Data for a specific protein
 train_dataset = load_rnacompete_data(protein_name='RBFOX1', split='train')
 val_dataset   = load_rnacompete_data(protein_name='RBFOX1', split='val')
 test_dataset  = load_rnacompete_data(protein_name='RBFOX1', split='test')
